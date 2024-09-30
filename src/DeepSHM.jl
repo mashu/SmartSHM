@@ -26,7 +26,7 @@ function generate_model(
 )
     Random.seed!(SEED)
     layers = []
-    
+
     # Convolutional layers
     for i in eachindex(channels_conv)
         if i == 1
@@ -35,16 +35,16 @@ function generate_model(
         else
             push!(layers, Conv((kernel_sizes[i][2], 4), channels_conv[i-1] => channels_conv[i], activation, pad=padding, init=initializer))
         end
-        
+
         if pooling[i] > 1
             push!(layers, MeanPool((pooling[i], 1)))
         end
-        
+
         push!(layers, Dropout(dropout_conv[i]))
     end
-    
+
     push!(layers, Flux.flatten)
-    
+
     # Calculate the size after flattening
     conv_output_width = input_shape[1]
     conv_output_height = input_shape[2]
@@ -54,13 +54,13 @@ function generate_model(
         end
     end
     conv_output_size = conv_output_width * conv_output_height * channels_conv[end]
-    
+
     # Fully connected layers
     for i in eachindex(channels_fc)
         push!(layers, Dense(i == 1 ? conv_output_size : channels_fc[i-1], channels_fc[i], activation, init=initializer))
         i < length(channels_fc) && push!(layers, Dropout(dropout_fc[i]))
     end
-    
+
     # Output layer
     if task == "mut_freq"
         push!(layers, Dense(channels_fc[end], 1, init=initializer))
@@ -68,7 +68,7 @@ function generate_model(
     elseif task in ["weighted_sub", "substitution"]
         push!(layers, Dense(channels_fc[end], 4, init=initializer))
     end
-    
+
     return Chain(layers...)
 end
 
@@ -112,19 +112,20 @@ function train!(model, train_data, test_data;
                 optimizer=Flux.RMSProp, 
                 loss=Flux.mse, 
                 save_path=nothing,
-                log_file="training_log.tsv",
                 eval_frequency=10,
-                use_gpu=true)
+                use_gpu=true,
+                log_file="training_log.tsv")
     opt = optimizer(learning_rate)
     opt_state = Flux.setup(opt, model)
-    
+
     # Initialize log file with headers
     open(log_file, "w") do io
-        println(io, "Epoch\tTraining Loss\tTest Loss")
+        println(io, "Epoch\tTraining Loss\tTraining MAE\tTest Loss\tTest MAE")
     end
 
     for epoch in 1:n_epochs
         total_loss = 0.0
+        total_mae = 0.0
         num_batches = 0
         for (x, y) in (use_gpu ? CUDA.CuIterator(train_data) : train_data)
             loss_val, grads = Flux.withgradient(model) do m
@@ -133,52 +134,70 @@ function train!(model, train_data, test_data;
             end
             Flux.update!(opt_state, model, grads[1])
             total_loss += loss_val
+            total_mae += mean(abs.(model(x) .- y))
             num_batches += 1
         end
         avg_loss = total_loss / num_batches
-        
+        avg_mae = total_mae / num_batches
+
         if epoch % eval_frequency == 0
-            println("Epoch $epoch: Average Training Loss = $avg_loss")
-            
+            println("Epoch $epoch: Average Training Loss = $avg_loss, MAE = $avg_mae")
+
             # Evaluation step
             test_loss = 0.0
+            test_mae = 0.0
             test_batches = 0
             for (x, y) in (use_gpu ? CUDA.CuIterator(test_data) : test_data)
                 ŷ = model(x)
                 test_loss += loss(ŷ, y)
+                test_mae += mean(abs.(ŷ .- y))
                 test_batches += 1
             end
             avg_test_loss = test_loss / test_batches
-            println("Epoch $epoch: Average Test Loss = $avg_test_loss")
+            avg_test_mae = test_mae / test_batches
+            println("Epoch $epoch: Average Test Loss = $avg_test_loss, MAE = $avg_test_mae")
 
-            # Log losses to file
+            # Log losses and MAE to file
             open(log_file, "a") do io
-                println(io, "$epoch\t$avg_loss\t$avg_test_loss")
+                println(io, "$epoch\t$avg_loss\t$avg_mae\t$avg_test_loss\t$avg_test_mae")
             end
         end
     end
-    
+
     if !isnothing(save_path)
         model_state = Flux.state(cpu(model))
-        jldsave(save_path, Dict("model" => model_state))
+        jldsave(save_path; model_state)
     end
 end
 
-train!(model, trainset, testset, n_epochs=500, save_path="models/DeepSHM-500epochs.jld2")
+train!(model, trainset, testset, n_epochs=500, save_path="results/DeepSHM-500epochs.jld2", log_file="results/training_log.tsv")
 
 function plot_learning_curves(log_file)
     df = CSV.read(log_file, DataFrame, delim='\t')
-    
-    fig = Figure()
-    ax = Axis(fig[1, 1], 
-              xlabel = "Epoch", 
-              ylabel = "Loss",
-              title = "Learning Curves")
-    
-    lines!(ax, df.Epoch, df."Training Loss", label="Training")
-    lines!(ax, df.Epoch, df."Test Loss", label="Test")
-    
-    axislegend()
-    
+
+    fig = Figure(size=(1000, 800))
+
+    # Loss plot
+    ax1 = Axis(fig[1, 1],
+               xlabel = "Epoch",
+               ylabel = "Loss",
+               title = "Learning Curves - Loss")
+
+    lines!(ax1, df.Epoch, df."Training Loss", label="Training")
+    lines!(ax1, df.Epoch, df."Test Loss", label="Test")
+
+    axislegend(ax1)
+
+    # MAE plot
+    ax2 = Axis(fig[2, 1],
+               xlabel = "Epoch",
+               ylabel = "MAE",
+               title = "Learning Curves - MAE")
+
+    lines!(ax2, df.Epoch, df."Training MAE", label="Training")
+    lines!(ax2, df.Epoch, df."Test MAE", label="Test")
+
+    axislegend(ax2)
+
     save("learning_curves.png", fig)
 end
