@@ -11,6 +11,7 @@ using CSV
 using DataFrames
 
 const SEED = 42
+
 function generate_model(
     input_shape,
     channels_conv,
@@ -31,13 +32,13 @@ function generate_model(
     for i in eachindex(channels_conv)
         if i == 1
             in_channels = input_shape[3]  # Assuming input_shape is (width, height, channels, batch_size)
-            push!(layers, Conv((kernel_sizes[i][2], 4), in_channels => channels_conv[i], activation, pad=padding, init=initializer))
+            push!(layers, Conv(kernel_sizes[i], in_channels => channels_conv[i], activation, pad=padding, init=initializer))
         else
-            push!(layers, Conv((kernel_sizes[i][2], 4), channels_conv[i-1] => channels_conv[i], activation, pad=padding, init=initializer))
+            push!(layers, Conv(kernel_sizes[i], channels_conv[i-1] => channels_conv[i], activation, pad=padding, init=initializer))
         end
 
         if pooling[i] > 1
-            push!(layers, MeanPool((pooling[i], 1)))
+            push!(layers, MeanPool((pooling[i], 1)))  # Pooling along sequence length
         end
 
         push!(layers, Dropout(dropout_conv[i]))
@@ -46,8 +47,8 @@ function generate_model(
     push!(layers, Flux.flatten)
 
     # Calculate the size after flattening
-    conv_output_width = input_shape[1]
-    conv_output_height = input_shape[2]
+    conv_output_width = input_shape[1]  # sequence length
+    conv_output_height = input_shape[2]  # nucleotide dimension
     for i in eachindex(channels_conv)
         if pooling[i] > 1
             conv_output_width = conv_output_width ÷ pooling[i]
@@ -73,7 +74,7 @@ function generate_model(
 end
 
 channels_conv = [32, 64, 128]
-kernel_sizes = [(4, 3), (1, 3), (1, 3)]
+kernel_sizes = [(3, 4), (3, 1), (3, 1)]
 pooling = [2, 2, 0]
 dropout_conv = [0.1, 0.1, 0.1]
 channels_fc = [128, 64]
@@ -170,9 +171,9 @@ function train!(model, train_data, test_data;
     end
 end
 
-train!(model, trainset, testset, n_epochs=500, save_path="results/DeepSHM-500epochs.jld2", log_file="results/training_log.tsv")
+train!(model, trainset, testset, n_epochs=2000, save_path="results/DeepSHM-2000epochs.jld2", log_file="results/training_log.tsv")
 
-function plot_learning_curves(log_file)
+function plot_learning_curves(log_file, output_path="results/learning_curves.png")
     df = CSV.read(log_file, DataFrame, delim='\t')
 
     fig = Figure(size=(1000, 800))
@@ -199,5 +200,7 @@ function plot_learning_curves(log_file)
 
     axislegend(ax2)
 
-    save("learning_curves.png", fig)
+    save(output_path, fig)
 end
+
+plot_learning_curves("results/training_log.tsv", "results/learning_curves.png")
