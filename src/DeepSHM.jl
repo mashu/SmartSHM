@@ -5,6 +5,7 @@ using HDF5
 using MLUtils: splitobs
 using Statistics
 using FluxTraining.Events: LossBegin, BackwardBegin, BackwardEnd
+using JLD2
 
 struct MyTrainingPhase <: FluxTraining.AbstractTrainingPhase end
 function FluxTraining.step!(learner, phase::MyTrainingPhase, batch)
@@ -28,6 +29,20 @@ function FluxTraining.step!(learner, phase::MyValidationPhase, batch)
         state.ŷs = learner.model(state.xs)
         state.loss = learner.lossfn(state.ŷs, state.ys)
     end
+end
+
+function save_model(model, epoch, optimiser, filename="models/DeepSHM.jld2")
+    model_state = Flux.state(cpu(model))
+    opt_state = Flux.state(cpu(optimiser))
+    jldsave(filename; model_state, epoch, opt_state)
+    println("Model saved to $filename")
+end
+
+function load_model(model, filename="models/DeepSHM.jld2")
+    data = load(filename)
+    Flux.loadmodel!(model, data["model_state"])
+    println("Model loaded from $filename")
+    return data["epoch"], data["opt_state"]
 end
 
 function prepare_data(kmers, freqs, batch_size=32)
@@ -121,15 +136,17 @@ model = Chain(
 ) |> gpu
 
 backend = TensorBoardBackend("logs/deepshm")
-
+epochs = 4000
 learner = Learner(model, Flux.Losses.mse,
     data = (trainiter, validiter),
     optimizer=Flux.RMSProp(1e-4),
-    callbacks=[Metrics(Metric(Flux.Losses.mae, name="Mean Absolute Error")), LogMetrics(backend), Checkpointer("models/DeepSHM.jld2", keep_top_k=1)],
+    callbacks=[Metrics(Metric(Flux.Losses.mae, name="Mean Absolute Error")), LogMetrics(backend)],
 )
-
 # Train
-for epoch in 1:4000
+for epoch in 1:epochs
     FluxTraining.epoch!(learner, MyTrainingPhase(), trainiter)
     FluxTraining.epoch!(learner, MyValidationPhase(), validiter)
 end
+
+save_model(model, epochs, learner.optimizer, "models/DeepSHM.jld2")
+#epoch, optimiser = load_model(model, "models/DeepSHM.jld2")
