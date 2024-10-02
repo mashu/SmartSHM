@@ -6,6 +6,10 @@ using MLUtils: splitobs
 using Statistics
 using FluxTraining.Events: LossBegin, BackwardBegin, BackwardEnd
 using JLD2
+using FASTX
+using OneHotArrays
+using CSV
+using DataFrames
 
 struct MyTrainingPhase <: FluxTraining.AbstractTrainingPhase end
 function FluxTraining.step!(learner, phase::MyTrainingPhase, batch)
@@ -31,18 +35,17 @@ function FluxTraining.step!(learner, phase::MyValidationPhase, batch)
     end
 end
 
-function save_model(model, epoch, optimiser, filename="models/DeepSHM.jld2")
+function save_model(model, epoch, filename="models/DeepSHM.jld2")
     model_state = Flux.state(cpu(model))
-    opt_state = Flux.state(cpu(optimiser))
-    jldsave(filename; model_state, epoch, opt_state)
+    jldsave(filename; model_state, epoch)
     println("Model saved to $filename")
 end
 
-function load_model(model, filename="models/DeepSHM.jld2")
+function load_model!(model, filename="models/DeepSHM.jld2")
     data = load(filename)
     Flux.loadmodel!(model, data["model_state"])
     println("Model loaded from $filename")
-    return data["epoch"], data["opt_state"]
+    return data["epoch"]
 end
 
 function prepare_data(kmers, freqs, batch_size=32)
@@ -143,10 +146,69 @@ learner = Learner(model, Flux.Losses.mse,
     callbacks=[Metrics(Metric(Flux.Losses.mae, name="Mean Absolute Error")), LogMetrics(backend)],
 )
 # Train
-for epoch in 1:epochs
-    FluxTraining.epoch!(learner, MyTrainingPhase(), trainiter)
-    FluxTraining.epoch!(learner, MyValidationPhase(), validiter)
+# for epoch in 1:epochs
+#     FluxTraining.epoch!(learner, MyTrainingPhase(), trainiter)
+#     FluxTraining.epoch!(learner, MyValidationPhase(), validiter)
+# end
+
+# save_model(model, epochs, "models/DeepSHM.jld2")
+load_model!(model, "models/DeepSHM.jld2")
+
+#
+# Do predictions for sequences in FASTA file
+#
+
+function load_fasta(fasta_file::String)
+    sequences = Vector{Tuple{String,String}}()
+    open(fasta_file, "r") do io
+        reader = FASTA.Reader(io)
+        for record in reader
+            seq_id = FASTA.identifier(record)
+            sequence = FASTA.sequence(String, record)
+            push!(sequences, (seq_id, sequence))
+        end
+    end
+    # Sort the sequences by name (first element of each tuple)
+    sort!(sequences, by = x -> x[1])
+    return sequences
 end
 
-save_model(model, epochs, learner.optimizer, "models/DeepSHM.jld2")
-#epoch, optimiser = load_model(model, "models/DeepSHM.jld2")
+function generate_kmers_for_sequences(sequences::Vector{Tuple{String,String}}, k::Int)
+    kmer_sequences = Vector{Tuple{String,Vector{String}}}()
+    for (seq_id, sequence) in sequences
+        kmers = String[]
+        for i in 1:(length(sequence) - k + 1)
+            push!(kmers, sequence[i:i+k-1])
+        end
+        push!(kmer_sequences, (seq_id, kmers))
+    end
+    return kmer_sequences
+end
+
+function encode_kmers(kmer_sequences::Vector{Tuple{String,Vector{String}}})
+    encoded_sequences = Vector{Tuple{String,Array{Bool,3}}}()
+    nucleotides = ['A', 'C', 'G', 'T']
+    for (seq_id, kmers) in kmer_sequences
+        k = length(first(kmers))
+        encoded_kmers = falses(4, k, length(kmers))
+        for (i, kmer) in enumerate(kmers)
+            for (j, nucleotide) in enumerate(kmer)
+                if nucleotide in nucleotides
+                    encoded_kmers[findfirst(==(nucleotide), nucleotides), j, i] = true
+                end
+            end
+        end
+        push!(encoded_sequences, (seq_id, encoded_kmers))
+    end
+    return encoded_sequences
+end
+
+loaded_sequences = load_fasta("data/Macaca_mulatta_V.fasta")
+kmer_sequences = generate_kmers_for_sequences(loaded_sequences, 15)
+encoded_sequences = encode_kmers(kmer_sequences)
+data = last.(encoded_sequences)
+# Reshape for the model
+x = permutedims(Flux.unsqueeze(cat(map(x->x[:,:,:], data)...,dims=3), dims=3),(2,1,3,4)) |> gpu
+x̂ = cpu(model(x))
+output = DataFrame(kmer=vcat(last.(kmer_sequences)...), mutation_frequency=x̂)
+CSV.write("predictions.tsv", output, delim='\t')
