@@ -203,6 +203,7 @@ function encode_kmers(kmer_sequences::Vector{Tuple{String,Vector{String}}})
     return encoded_sequences
 end
 
+@info "Predicting mutation frequency for sequences in FASTA file"
 loaded_sequences = load_fasta("data/Macaca_mulatta_V.fasta")
 kmer_sequences = generate_kmers_for_sequences(loaded_sequences, 15)
 encoded_sequences = encode_kmers(kmer_sequences)
@@ -211,4 +212,5 @@ data = last.(encoded_sequences)
 x = permutedims(Flux.unsqueeze(cat(map(x->x[:,:,:], data)...,dims=3), dims=3),(2,1,3,4)) |> gpu
 x̂ = cpu(model(x))
 output = DataFrame(kmer=vcat(last.(kmer_sequences)...), mutation_frequency=x̂)
+@info "Preductions saved in predictions.tsv"
 CSV.write("predictions.tsv", output, delim='\t')
